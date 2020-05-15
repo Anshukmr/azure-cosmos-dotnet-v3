@@ -24,30 +24,6 @@ namespace Microsoft.Azure.Cosmos.Serializer
         /// <summary>
         /// Converts a list of CosmosElements into a memory stream.
         /// </summary>
-        /// <param name="stream">The stream response from Azure Cosmos</param>
-        /// <param name="resourceType">The resource type</param>
-        /// <param name="cosmosSerializationOptions">The custom serialization options. This allows custom serialization types like BSON, JSON, or other formats</param>
-        /// <returns>Returns a memory stream of cosmos elements. By default the memory stream will contain JSON.</returns>
-        internal static CosmosArray ToCosmosElements(
-            Stream stream,
-            ResourceType resourceType,
-            CosmosSerializationFormatOptions cosmosSerializationOptions = null)
-        {
-            MemoryStream memoryStream = stream as MemoryStream;
-            if (memoryStream == null)
-            {
-                memoryStream = new MemoryStream();
-                stream.CopyTo(memoryStream);
-            }
-
-            return CosmosElementSerializer.ToCosmosElements(
-                    memoryStream,
-                    resourceType,
-                    cosmosSerializationOptions);
-        }
-        /// <summary>
-        /// Converts a list of CosmosElements into a memory stream.
-        /// </summary>
         /// <param name="memoryStream">The memory stream response from Azure Cosmos</param>
         /// <param name="resourceType">The resource type</param>
         /// <param name="cosmosSerializationOptions">The custom serialization options. This allows custom serialization types like BSON, JSON, or other formats</param>
@@ -235,16 +211,10 @@ namespace Microsoft.Azure.Cosmos.Serializer
 
             jsonWriter.WriteObjectEnd();
 
-            ReadOnlyMemory<byte> result = jsonWriter.GetResult();
-            if (!MemoryMarshal.TryGetArray(result, out ArraySegment<byte> resultAsArray))
-            {
-                resultAsArray = new ArraySegment<byte>(result.ToArray());
-            }
-
-            return new MemoryStream(resultAsArray.Array, resultAsArray.Offset, resultAsArray.Count, writable: false, publiclyVisible: true);
+            return GetMemoryStreamFromJsonWriter(jsonWriter);
         }
 
-        internal static IEnumerable<T> GetResources<T>(
+        internal static IReadOnlyList<T> GetResources<T>(
             IReadOnlyList<CosmosElement> cosmosArray,
             CosmosSerializerCore serializerCore)
         {
@@ -255,7 +225,7 @@ namespace Microsoft.Azure.Cosmos.Serializer
 
             if (typeof(CosmosElement).IsAssignableFrom(typeof(T)))
             {
-                return cosmosArray.Cast<T>();
+                return cosmosArray.Cast<T>().ToList();
             }
 
             return CosmosElementSerializer.GetResourcesHelper<T>(
@@ -263,18 +233,17 @@ namespace Microsoft.Azure.Cosmos.Serializer
                 serializerCore);
         }
 
-        private static IEnumerable<T> GetResourcesHelper<T>(
-            IReadOnlyList<CosmosElement> cosmosArray,
-            CosmosSerializerCore serializerCore)
+        internal static T[] GetResourcesHelper<T>(
+            IReadOnlyList<CosmosElement> cosmosElements,
+            CosmosSerializerCore serializerCore,
+            CosmosSerializationFormatOptions cosmosSerializationOptions = null)
         {
-            List<T> result = new List<T>();
-            foreach (CosmosElement element in cosmosArray)
+            using (MemoryStream memoryStream = ElementsToMemoryStream(
+                cosmosElements,
+                cosmosSerializationOptions))
             {
-                MemoryStream memory = CosmosElementSerializer.ElementToMemoryStream(element, null);
-                result.Add(serializerCore.FromStream<T>(memory));
+                return serializerCore.FromFeedStream<T>(memoryStream);
             }
-
-            return result;
         }
 
         /// <summary>
@@ -304,9 +273,9 @@ namespace Microsoft.Azure.Cosmos.Serializer
                 resourceType,
                 cosmosSerializationOptions);
 
-            IEnumerable<T> typedResults = jsonSerializer.FromFeedResponseStream<T>(
-                stream,
-                resourceType);
+            IEnumerable<T> typedResults = CosmosFeedResponseSerializer.FromFeedResponseStream<T>(
+                jsonSerializer,
+                stream);
 
             return typedResults;
         }
@@ -314,11 +283,11 @@ namespace Microsoft.Azure.Cosmos.Serializer
         /// <summary>
         /// Converts a list of CosmosElements into a memory stream.
         /// </summary>
-        /// <param name="cosmosElement">The cosmos elements</param>
+        /// <param name="cosmosElements">The cosmos elements</param>
         /// <param name="cosmosSerializationOptions">The custom serialization options. This allows custom serialization types like BSON, JSON, or other formats</param>
         /// <returns>Returns a memory stream of cosmos elements. By default the memory stream will contain JSON.</returns>
-        private static MemoryStream ElementToMemoryStream(
-            CosmosElement cosmosElement,
+        internal static MemoryStream ElementsToMemoryStream(
+            IReadOnlyList<CosmosElement> cosmosElements,
             CosmosSerializationFormatOptions cosmosSerializationOptions = null)
         {
             IJsonWriter jsonWriter;
@@ -331,15 +300,32 @@ namespace Microsoft.Azure.Cosmos.Serializer
                 jsonWriter = JsonWriter.Create(JsonSerializationFormat.Text);
             }
 
-            cosmosElement.WriteTo(jsonWriter);
+            jsonWriter.WriteArrayStart();
 
+            foreach (CosmosElement element in cosmosElements)
+            {
+                element.WriteTo(jsonWriter);
+            }
+
+            jsonWriter.WriteArrayEnd();
+
+            return GetMemoryStreamFromJsonWriter(jsonWriter);
+        }
+
+        private static MemoryStream GetMemoryStreamFromJsonWriter(IJsonWriter jsonWriter)
+        {
             ReadOnlyMemory<byte> result = jsonWriter.GetResult();
             if (!MemoryMarshal.TryGetArray(result, out ArraySegment<byte> resultAsArray))
             {
                 resultAsArray = new ArraySegment<byte>(result.ToArray());
             }
 
-            return new MemoryStream(resultAsArray.Array, resultAsArray.Offset, resultAsArray.Count);
+            return new MemoryStream(
+                buffer: resultAsArray.Array,
+                index: resultAsArray.Offset,
+                count: resultAsArray.Count,
+                writable: false,
+                publiclyVisible: true);
         }
 
         private static string GetRootNodeName(ResourceType resourceType)
